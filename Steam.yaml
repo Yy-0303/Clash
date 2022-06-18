@@ -1,5 +1,4 @@
 payload:
-  - DOMAIN-KEYWORD,steamconnect
   - DOMAIN,steambroadcast.akamaized.net
   - DOMAIN,steamcdn-a.akamaihd.net
   - DOMAIN,steamcommunity-a.akamaihd.net
