@@ -1,0 +1,140 @@
+log:
+  level: info
+  file: ''
+
+plugin:
+
+  ################# 服务器插件 ################
+
+  - tag: main_server  # 服务器插件。(一个正常工作的 DNS 软件必需要一个服务器插件接收客户端的请求。)
+    type: server
+    args:
+      entry:          # 这里设定收到的请求会经过哪些插件(被哪些插件处理)。
+        - _no_ecs
+        - _single_flight
+        - main_sequence   # 运行主执行序列
+
+      server:   # 监听以下协议和端口
+        - protocol: udp
+          addr: "[::1]:5335"
+        - protocol: tcp
+          addr: "[::1]:5335"
+        - protocol: udp
+          addr: "127.0.0.1:5335"
+        - protocol: tcp
+          addr: "127.0.0.1:5335"
+
+  ################# 可执行插件 ################
+
+  # 主执行序列。包含分流的逻辑的插件。
+  # 当然这些逻辑直接写在 `server` 的 entry 也没问题。这里只是 `sequence` 插件的示例。让配置看起来更干净。 
+  - tag: main_sequence
+    type: sequence
+    args:
+      exec:
+        - if:
+            - query_is_ad_domain    # 已知的广告域名
+          exec:
+            - _block_with_nxdomain  # 生成 NXDOMAIN 应答
+            - _return               # 返回。不再执行后续插件。
+
+        - mem_cache      # 运行缓存插件。放在这里就可以避免缓存到无用的广告域名。
+
+        - if:
+            - query_is_local_domain   # 已知的本地域名
+            - '!_query_is_common'     # 和不常见的请求类型
+          exec:
+            - forward_local           # 用本地服务器获取应答
+            - _return
+
+        - if:
+            - query_is_non_local_domain  # 已知的非本地域名
+          exec:
+            - _prefer_ipv4               # 优先 IPv4
+            - forward_remote             # 用远程服务器获取应答
+            - _return
+
+        # 剩下的未知域名用 IP 分流。原理类似 ChinaDNS，但更稳定。
+        # 详细分流原理请参考 `fallback` 的工作流程。
+        - primary:
+            - forward_local     # 本地服务器获取应答。
+            - if:
+                - '!response_has_local_ip'  # 应答包含非本地 IP。
+              exec:
+                - _drop_response            # 丢掉。
+          secondary:
+            - _prefer_ipv4
+            - forward_remote
+          fast_fallback: 150  # 这里建议设置成 local 服务器正常延时的 2~5 倍。
+                              # 这个延时保证了 local 延时偶尔变高时，其结果不会被 remote 抢答。
+                              # 如果 local 超过这个延时还没响应，可以假设 local 出现了问题。
+                              # 这时用就采用 remote 的应答。单位: 毫秒。
+          always_standby: true
+
+
+  # 缓存
+  - tag: 'mem_cache'
+    type: 'cache'
+    args:
+      size: 1024
+      lazy_cache_ttl: 17200
+
+  # 转发请求至本地服务器的插件
+  - tag: forward_local
+    type: fast_forward
+    args:
+      upstream:
+        - addr: "udp://114.114.114.114"
+        - addr: "udp://223.5.5.5"
+        - addr: "https://dns.alidns.com/dns-query"
+          idle_timeout: 30
+          trusted: true
+        - addr: "https://doh.pub/dns-query"
+          idle_timeout: 30
+          trusted: true
+
+  # 转发请求至远程服务器的插件
+  - tag: forward_remote
+    type: fast_forward
+    args:
+      upstream:
+        - addr: "udp://8.8.8.8"
+        - addr: "https://dns.google/dns-query"
+          dial_addr: "8.8.8.8:443"
+          idle_timeout: 30
+          trusted: true
+        - addr: "https://cloudflare-dns.com/dns-query"
+          dial_addr: "1.1.1.1:443"
+          idle_timeout: 30
+          trusted: true
+
+  ################ 匹配器插件 #################
+
+  # 匹配本地域名的插件
+  - tag: query_is_local_domain
+    type: query_matcher
+    args:
+      domain:
+        - 'ext:./geosite.dat:cn'
+        - 'ext:./geosite.dat:apple-cn'
+
+  # 匹配非本地域名的插件
+  - tag: query_is_non_local_domain
+    type: query_matcher
+    args:
+      domain:
+        - 'ext:./geosite.dat:geolocation-!cn'
+
+  # 匹配广告域名的插件
+  - tag: query_is_ad_domain
+    type: query_matcher
+    args:
+      domain:
+        - 'ext:./geosite.dat:category-ads-all'
+
+  # 匹配本地 IP 的插件
+  - tag: response_has_local_ip
+    type: response_matcher
+    args:
+      ip:
+        - 'ext:./geoip.dat:cn'
